@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# HexaArch 생성 부산물 (스펙에서 재생성 가능 → 커밋 안 함)
+*-GEN/
+/out/
+.scaffold-cache/
+
+# 테스트/도구
+.pytest_cache/
+.mypy_cache/
+.coverage

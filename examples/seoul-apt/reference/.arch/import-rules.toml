@@ -1,0 +1,14 @@
+# 방어선 C — 경계 가드 설정 (DESIGN §3.4)
+# 현재는 tests/test_boundary.py(stdlib AST)가 강제. 정식 단계에서 import-linter로 교체.
+
+[[rule]]
+name = "domain은 adapters/application 의존 금지"
+forbidden = "contexts.*.domain -> contexts.*.adapters"
+
+[[rule]]
+name = "domain은 application 의존 금지 (안쪽이 바깥쪽 모름)"
+forbidden = "contexts.*.domain -> contexts.*.application"
+
+[[rule]]
+name = "도메인 간 직접 의존 금지 (이벤트/포트로만)"
+forbidden = "contexts.valuation -> contexts.market | contexts.regulation"

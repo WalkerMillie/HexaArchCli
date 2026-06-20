@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hexaarch"
+version = "0.1.0"
+description = "Policy-Driven Hexagonal Scaffolding Framework — 정책 스펙에서 헥사고날 골격을 결정론적으로 생성하고 경계를 빌드에서 강제"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "walker" }]
+keywords = ["hexagonal", "clean-architecture", "scaffolding", "codegen", "policy"]
+dependencies = [
+    "pyyaml>=6",
+    "pydantic>=2",
+    "jinja2>=3",
+]
+
+[project.optional-dependencies]
+cli = ["typer>=0.12"]          # 추후 typer CLI. 현재 본체 CLI는 stdlib argparse라 불필요.
+dev = ["pytest>=8", "import-linter>=2"]
+
+[project.scripts]
+hexaarch = "hexaarch.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["hexaarch*"]
+
+[tool.setuptools.package-data]
+hexaarch = ["templates/*.j2"]   # 추후 템플릿 외부화 대비

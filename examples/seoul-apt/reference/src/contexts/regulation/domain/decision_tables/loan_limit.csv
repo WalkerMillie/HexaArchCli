@@ -1,0 +1,10 @@
+# 대출 한도 결정표 (range + 버저닝). req: REG-001
+# price_min_eok <= 시가(억) < price_max_eok  → max_loan_eok (억). price_max 빈칸 = 무한대.
+# 한계 #6(연속값 range) + #7(effective_date 버저닝, 조건부 공존) 실측 대상.
+version,effective_date,price_min_eok,price_max_eok,max_loan_eok
+2026v1,2026-01-01,0,15,6
+2026v1,2026-01-01,15,25,4
+2026v1,2026-01-01,25,,2
+2026v2,2026-07-01,0,15,5
+2026v2,2026-07-01,15,25,3
+2026v2,2026-07-01,25,,1

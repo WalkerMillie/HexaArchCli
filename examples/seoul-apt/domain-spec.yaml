@@ -1,0 +1,80 @@
+# HexaArch domain-spec — seoul-apt (Phase 3: 레퍼런스 역추출, 확장 스키마)
+# 이 파일이 단일 진실 공급원(SSOT). 생성기는 이걸 결정론적으로 골격으로 펼친다.
+#
+# 확장 스키마(Phase 1 한계 흡수):
+#   #0 contexts: 리스트(멀티 컨텍스트)   #4 decision_tables ↔ formulas 분리
+#   #5 domain.kind: aggregate|calculation|reference
+#   #6 decision_table.kind: range|lookup|flag   #7 versioned(effective_date)
+#   #8 infrastructure.messaging(이벤트) ↔ task_queue(비동기작업) 분리
+version: "0.1"
+
+infrastructure:
+  database: postgres
+  messaging: in-process-events    # 도메인 이벤트 버스 (#8)
+  task_queue: celery-redis        # 비동기 작업 큐 (≠ 이벤트, #8)
+
+contexts:
+  # ---------------- valuation ----------------
+  - name: valuation
+    domains:
+      AnalysisEligibility:
+        kind: aggregate                 # #5
+        states: [LOCKED, READY, ANALYZED]
+        transitions:                    # 방어선 A의 데이터
+          LOCKED: [READY]
+          READY: [ANALYZED, LOCKED]
+          ANALYZED: [READY, LOCKED]
+        guards:                         # #2 조건부 전이 (B형: aggregate 내장, impl)
+          - edge: "LOCKED->READY"       # 'on'은 YAML이 boolean으로 해석 → 'edge' 사용
+            id: VAL-005
+            desc: "거래량 프록시 임계 이상이면 잠금 해제"
+        invariants:                     # 방어선 B
+          - id: VAL-004
+            desc: "손익분기/ROE는 대출액 ≤ 규제한도일 때만 유효 (크로스 컨텍스트)"
+          - id: VAL-003
+            desc: "READY 아니면 분석 산출 불가"
+        ports_out: [TradeVolumeQuery, RegulationLimitQuery]
+      Breakeven:
+        kind: calculation               # #5 무상태
+        formulas:                       # #4 (결정표 아님)
+          - id: VAL-001
+            name: breakeven_rate
+      Roe:
+        kind: calculation
+        formulas:
+          - id: VAL-002
+            name: leverage_roe
+    relations:
+      - to: collection
+        via: event                      # 직접 호출 금지
+        event: CollectionCompleted
+
+  # ---------------- regulation ----------------
+  - name: regulation
+    decision_tables:                    # #4 분리 — 이 컨텍스트는 aggregate 없이 표만
+      - name: loan_limit
+        kind: range                     # #6 연속값 구간
+        inputs: [price]
+        output: max_loan
+        versioned: true                 # #7 effective_date 버저닝(조건부 공존)
+        id: REG-001
+
+  # ---------------- collection ----------------
+  - name: collection
+    domains:
+      CollectionJob:
+        kind: aggregate
+        states: [IDLE, RUNNING, SUCCEEDED, FAILED]
+        transitions:
+          IDLE: [RUNNING]
+          RUNNING: [SUCCEEDED, FAILED]
+          FAILED: [RUNNING]
+          SUCCEEDED: [RUNNING]
+        invariants:
+          - id: COL-004
+            desc: "부분 수집 결과로는 SUCCEEDED 불가"
+        relationship_invariants:        # #1 aggregate 밖, 스토어 강제
+          - id: COL-002
+            desc: "같은 source 동시 RUNNING 금지"
+            enforced_by: store
+        ports_out: [TradeSource, TradeRepository, JobRegistry]
