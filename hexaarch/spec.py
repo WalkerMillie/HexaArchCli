@@ -96,6 +96,7 @@ class Infrastructure(BaseModel):
     database: str
     messaging: str
     task_queue: str | None = None
+    web: Literal["none", "drf"] = "none"   # 웹 어댑터 생성 여부(기본 미생성). drf=§11 디폴트
 
 
 class Spec(BaseModel):

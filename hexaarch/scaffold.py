@@ -216,6 +216,13 @@ class DomainBoundary(unittest.TestCase):
                     for other in ALL - {ctx}:
                         if f"contexts.{other}" in mod:
                             bad.append(f"{ctx}/domain/{py.name}: 타컨텍스트 {mod}")
+            # §2 — web 어댑터는 도메인 직접 import 금지 (application 유스케이스 경유).
+            web = CONTEXTS / ctx / "adapters" / "web"
+            if web.exists():
+                for py in web.rglob("*.py"):
+                    for mod in _imports(py):
+                        if f"contexts.{ctx}.domain" in mod:
+                            bad.append(f"{ctx}/adapters/web/{py.name}: 도메인 직접 import {mod} (§2)")
         self.assertEqual(bad, [], "\\n".join(bad))
 
 
@@ -530,6 +537,94 @@ hexaarch check {{ spec_hint }} .
 '''
 )
 
+# ── 웹 어댑터(DRF) — 헥사곤 바깥 링. §2 판단 누출 방어 (DESIGN §11) ──
+# 방향: web(adapters) → application(유스케이스) → domain. web은 도메인 직접 import 금지(check가 강제).
+
+SERVICE_T = _env.from_string(
+    '''"""[GENERATED 골격] {{ agg }} 유스케이스 (application). §2: 판단/계산은 도메인에, 여기선 조율만.
+
+도메인 메서드를 호출(로드→전이/계산→저장)할 뿐, if로 규칙을 재구현하지 않는다.
+아웃바운드 의존(저장소 등)은 포트로 생성자 주입받는다.
+"""
+
+from contexts.{{ ctx }}.domain.{{ snake }} import {{ agg }}
+
+
+class {{ agg }}Service:
+    # >>> impl: editable (유스케이스 — 도메인 호출만. 판단/계산 금지)
+    def __init__(self, *deps):
+        self._deps = deps
+    # <<< impl
+'''
+)
+
+SERIALIZER_T = _env.from_string(
+    '''"""[GENERATED 골격] {{ ctx }} 직렬화기 (web adapter)."""
+
+from rest_framework import serializers
+
+{% for agg in aggs %}
+
+class {{ agg }}Serializer(serializers.Serializer):
+    # >>> impl: editable (필드 정의)
+    pass
+    # <<< impl
+{% endfor %}'''
+)
+
+VIEW_T = _env.from_string(
+    '''"""[GENERATED 골격] {{ ctx }} DRF 뷰 (web adapter).
+
+§2: 비즈니스 로직 금지 — application 유스케이스만 호출한다.
+도메인 직접 import 금지(check의 boundary가 막는다). 반드시 서비스를 통해서.
+"""
+
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from contexts.{{ ctx }}.application import (
+{% for agg in aggs %}    {{ agg }}Service,
+{% endfor %})
+from contexts.{{ ctx }}.adapters.web.serializers import (
+{% for agg in aggs %}    {{ agg }}Serializer,
+{% endfor %})
+
+{% for agg in aggs %}
+
+class {{ agg }}View(APIView):
+    # >>> impl: editable (요청 파싱 → 서비스 호출 → 응답. 판단/계산 금지)
+    def post(self, request):
+        raise NotImplementedError
+    # <<< impl
+{% endfor %}'''
+)
+
+URLS_T = _env.from_string(
+    '''"""[GENERATED 골격] {{ ctx }} URL 라우팅 (web adapter)."""
+
+from django.urls import path
+
+from contexts.{{ ctx }}.adapters.web.views import (
+{% for agg in aggs %}    {{ agg }}View,
+{% endfor %})
+
+urlpatterns = [
+    # >>> impl: editable (경로 ↔ 뷰 매핑)
+{% for item in items %}    path("{{ item.path }}/", {{ item.agg }}View.as_view(), name="{{ item.path }}"),
+{% endfor %}    # <<< impl
+]
+'''
+)
+
+APP_INIT_T = _env.from_string(
+    '''"""[GENERATED] {{ ctx }} application — 유스케이스 모음."""
+
+{% for agg in aggs %}from contexts.{{ ctx }}.application.{{ snakes[agg] }}_service import {{ agg }}Service
+{% endfor %}
+__all__ = [{% for agg in aggs %}"{{ agg }}Service"{% if not loop.last %}, {% endif %}{% endfor %}]
+'''
+)
+
 
 def _prefixenum(states, enum):
     return [f"{enum}.{s}" for s in states]
@@ -570,6 +665,8 @@ def scaffold(spec: Spec, out_dir: str | Path) -> list[str]:
             _emit_domain(w, c, agg, d)
         if c.decision_tables:
             _emit_decision_tables(w, out, written, c)
+        if spec.infrastructure.web == "drf" and has_agg:
+            _emit_web(w, c)
 
     # 테스트 + 경계 설정
     _write(out / "tests" / "__init__.py", "")
@@ -666,6 +763,30 @@ def _emit_decision_tables(w, out: Path, written: list[str], c: Context) -> None:
             _write(out / "tests" / f"test_{c.name}_{slug}_table.py",
                    DT_LOOKUP_TEST_T.render(inputs=inputs_safe, **common))
         written.append(f"tests/test_{c.name}_{slug}_table.py")
+
+
+def _emit_web(w, c: Context) -> None:
+    """웹 어댑터(DRF) + application 유스케이스. §2: web→application→domain (도메인 직접 import 금지)."""
+    base = f"contexts/{c.name}"
+    aggs = [a for a, d in c.domains.items() if d.kind == "aggregate"]
+    if not aggs:
+        return
+    snakes = {a: _snake(a) for a in aggs}
+
+    # application 유스케이스 (도메인 호출만)
+    for a in aggs:
+        w(f"{base}/application/{snakes[a]}_service.py",
+          SERVICE_T.render(ctx=c.name, agg=a, snake=snakes[a]))
+    w(f"{base}/application/__init__.py",
+      APP_INIT_T.render(ctx=c.name, aggs=aggs, snakes=snakes))
+
+    # web 어댑터 (유스케이스만 호출, 도메인 직접 import 금지)
+    w(f"{base}/adapters/__init__.py", "")
+    w(f"{base}/adapters/web/__init__.py", "")
+    w(f"{base}/adapters/web/serializers.py", SERIALIZER_T.render(ctx=c.name, aggs=aggs))
+    w(f"{base}/adapters/web/views.py", VIEW_T.render(ctx=c.name, aggs=aggs))
+    items = [{"agg": a, "path": snakes[a]} for a in aggs]
+    w(f"{base}/adapters/web/urls.py", URLS_T.render(ctx=c.name, aggs=aggs, items=items))
 
 
 def main(spec_path: str, out_dir: str) -> None:

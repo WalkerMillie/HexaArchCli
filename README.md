@@ -38,7 +38,7 @@ HexaArch는 **단일 정책 스펙(`domain-spec.yaml`)을 진실의 원천(SSOT)
 | **select-arch** | (자문) 정책문서 → 바운디드 컨텍스트 분해 **대안 N개** + 장단점/추천. 스펙 확정 전 설계 탐색. |
 | **extract** | 정책/기획 문서 → 스펙 초안. 사용자 Claude 세션(`claude -p`)으로 추출 후 **검증→자가복구** 루프. |
 | **validate** | 스펙을 Pydantic + 의미 규칙으로 검증. 깨진 IR(미정의 상태 전이·자기 전이·가드 불일치 등)은 생성 *전에* 거부. |
-| **scaffold** | 스펙 → 상태 머신·`_transition`·예외·포트·전이 매트릭스 테스트·경계 가드·`AGENTS.md` 생성. 결정표는 *순수 평가기*(range 구간 룩업 + `effective_date` 버저닝 + **완전성 검사**)와 CSV 로더(어댑터)로 생성 — "정책을 도메인 코어에 박는다". |
+| **scaffold** | 스펙 → 상태 머신·`_transition`·예외·포트·전이 매트릭스 테스트·경계 가드·`AGENTS.md` 생성. 결정표는 *순수 평가기*(range 구간 룩업 + `effective_date` 버저닝 + **완전성 검사**)와 CSV 로더(어댑터)로 생성. `infrastructure.web: drf`면 application 유스케이스 + DRF 어댑터(serializer/view/urls)까지 생성하고 **web→application→domain** 방향을 강제(§2 판단 누출 방어). — "정책을 도메인 코어에 박는다". |
 | **check** | (코드 편집 가드) 매 편집 후 "원본 규칙이 깨졌는지" 판정. `스펙 재생성 → impl 블록만 빼고 비교(drift) + 도메인 import 스캔(boundary)`. |
 | **gate** | (스펙 변경 가드) 스펙 old→new를 비교해 **통과/대안/거부**. 가드·불변식·상태 제거는 기본 거부. |
 
@@ -48,12 +48,13 @@ HexaArch는 **단일 정책 스펙(`domain-spec.yaml`)을 진실의 원천(SSOT)
   바이브코딩은 `>>> impl` 블록 안에서만, 그리고 새 파일로 한다. 그 밖을 건드리면 `check`가 **drift**로 잡는다.
 - **도메인 경계**: `contexts/*/domain/`은 어댑터·인프라·타 컨텍스트를 import 금지(`adapters`, `django`,
   `sqlalchemy`, `requests`, `celery` …). impl 블록 안에서도 경계는 못 넘는다 → `check`가 **boundary**로 잡는다.
+- **§2 판단 누출 방어**: 웹 어댑터(`adapters/web/`)는 도메인을 직접 import 금지 — 반드시 `application` 유스케이스를 통한다. 뷰에 비즈니스 로직이 새는 걸 구조로 막는다 → `check`가 **boundary**로 잡는다.
 
 ### 스펙 한눈에 (`domain-spec.yaml`)
 
 ```yaml
 version: "0.1"
-infrastructure: {database: pg, messaging: redis, task_queue: celery}
+infrastructure: {database: pg, messaging: redis, task_queue: celery, web: drf}  # web 생략 시 미생성
 contexts:
   - name: valuation
     domains:
@@ -162,7 +163,7 @@ cd examples/seoul-apt/reference && PYTHONPATH=src python3 -m unittest discover -
 3. ✅ LLM `extract` (사용자 Claude 세션)
 4. ✅ 결정표 로직 생성 (range 룩업·버저닝·완전성 검사 + CSV 로더)
 5. ✅ `select-arch` (아키텍처 분해 대안 제시, LLM 자문)
-6. ⬜ DRF 어댑터/view 스텁 생성 확장 (§2 판단 누출 방어)
+6. ✅ DRF 어댑터/view 스텁 생성 + §2 web→application→domain 경계 강제
 
 ## 기술 스택
 

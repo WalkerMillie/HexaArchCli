@@ -114,19 +114,28 @@ def _boundary_scan(proj_root: Path) -> list[Violation]:
     out: list[Violation] = []
     for ctx in sorted(all_ctx):
         dom = contexts / ctx / "domain"
-        if not dom.is_dir():
-            continue
-        for py in sorted(dom.rglob("*.py")):
-            rel = py.relative_to(proj_root)
-            for mod in _domain_imports(py):
-                hit = next((f for f in FORBIDDEN_IMPORTS if f in mod), None)
-                if hit:
-                    out.append(Violation("boundary", str(rel),
-                                         f"도메인이 금지 대상 import: {mod}  (금지어: {hit})"))
-                for other in all_ctx - {ctx}:
-                    if f"contexts.{other}" in mod:
+        if dom.is_dir():
+            for py in sorted(dom.rglob("*.py")):
+                rel = py.relative_to(proj_root)
+                for mod in _domain_imports(py):
+                    hit = next((f for f in FORBIDDEN_IMPORTS if f in mod), None)
+                    if hit:
                         out.append(Violation("boundary", str(rel),
-                                             f"도메인이 타 컨텍스트 import: {mod}"))
+                                             f"도메인이 금지 대상 import: {mod}  (금지어: {hit})"))
+                    for other in all_ctx - {ctx}:
+                        if f"contexts.{other}" in mod:
+                            out.append(Violation("boundary", str(rel),
+                                                 f"도메인이 타 컨텍스트 import: {mod}"))
+        # §2 — web 어댑터는 도메인을 직접 import 금지(반드시 application 유스케이스 경유).
+        web = contexts / ctx / "adapters" / "web"
+        if web.is_dir():
+            for py in sorted(web.rglob("*.py")):
+                rel = py.relative_to(proj_root)
+                for mod in _domain_imports(py):
+                    if f"contexts.{ctx}.domain" in mod:
+                        out.append(Violation("boundary", str(rel),
+                            f"web 어댑터가 도메인 직접 import: {mod} "
+                            "(§2 — application 유스케이스를 통해야 함)"))
     return out
 
 
