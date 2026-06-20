@@ -37,8 +37,8 @@ HexaArch는 **단일 정책 스펙(`domain-spec.yaml`)을 진실의 원천(SSOT)
 |---|---|
 | **select-arch** | (자문) 정책문서 → 바운디드 컨텍스트 분해 **대안 N개** + 장단점/추천. 스펙 확정 전 설계 탐색. |
 | **extract** | 정책/기획 문서 → 스펙 초안. 사용자 Claude 세션(`claude -p`)으로 추출 후 **검증→자가복구** 루프. |
-| **validate** | 스펙을 Pydantic + 의미 규칙으로 검증. 깨진 IR(미정의 상태 전이·자기 전이·가드 불일치 등)은 생성 *전에* 거부. |
-| **scaffold** | 스펙 → 상태 머신·`_transition`·예외·포트·전이 매트릭스 테스트·경계 가드·`AGENTS.md` 생성. 결정표는 *순수 평가기*(range 구간 룩업 + `effective_date` 버저닝 + **완전성 검사**)와 CSV 로더(어댑터)로 생성. `infrastructure.web: drf`면 application 유스케이스 + DRF 어댑터(serializer/view/urls)까지 생성하고 **web→application→domain** 방향을 강제(§2 판단 누출 방어). calculation은 수식별 함수 슬롯, reference는 조회 스텁으로 생성. 결정표·수식·포트·입출력의 한글/공백 이름은 안전 식별자로 정규화(원본명은 주석 보존). — "정책을 도메인 코어에 박는다". |
+| **validate** | 스펙을 Pydantic + 의미 규칙으로 검증. 깨진 IR(미정의 상태 전이·자기 전이·가드 불일치 등)은 생성 *전에* 거부. 코드가 되는 이름(컨텍스트·애그리거트·상태)은 유효 식별자 강제 → "검증 통과 = 생성물 전부 유효 파이썬". |
+| **scaffold** | 스펙 → 상태 머신·`_transition`·예외·포트·전이 매트릭스 테스트·경계 가드·`AGENTS.md` 생성. 결정표는 *순수 평가기*(단일입력 range = 구간 룩업 + `effective_date` 버저닝 + **완전성 검사**, 다중입력 range = N차원 구간 룩업, lookup/flag = 정확매칭)와 CSV 로더(어댑터)로 생성. `infrastructure.web: drf`면 application 유스케이스 + DRF 어댑터(serializer/view/urls)까지 생성하고 **web→application→domain** 방향을 강제(§2 판단 누출 방어). calculation은 수식별 함수 슬롯, reference는 조회 스텁으로 생성. 결정표·수식·포트·입출력의 한글/공백 이름은 안전 식별자로 정규화(원본명은 주석 보존). — "정책을 도메인 코어에 박는다". |
 | **check** | (코드 편집 가드) 매 편집 후 "원본 규칙이 깨졌는지" 판정. `스펙 재생성 → impl 블록만 빼고 비교(drift) + 도메인 import 스캔(boundary)`. |
 | **gate** | (스펙 변경 가드) 스펙 old→new를 비교해 **통과/대안/거부**. 가드·불변식·상태 제거는 기본 거부. |
 
@@ -164,6 +164,8 @@ cd examples/seoul-apt/reference && PYTHONPATH=src python3 -m unittest discover -
 4. ✅ 결정표 로직 생성 (range 룩업·버저닝·완전성 검사 + CSV 로더)
 5. ✅ `select-arch` (아키텍처 분해 대안 제시, LLM 자문)
 6. ✅ DRF 어댑터/view 스텁 생성 + §2 web→application→domain 경계 강제
+7. ✅ 다듬기 — calculation 함수 슬롯·reference 스텁·산문형 이름 정규화·식별자 검증·다중입력 range
+8. ⬜ 배포 애드온(K3s/Cloudflare 옵트인)
 
 ## 기술 스택
 

@@ -55,6 +55,26 @@ class SpecValidation(unittest.TestCase):
         with self.assertRaises(ValidationError):
             Spec.model_validate(bad)
 
+    def test_context_name_with_space_rejected(self):
+        bad = {"version": "0.1", "infrastructure": {"database": "pg", "messaging": "ev"},
+               "contexts": [{"name": "my ctx", "domains": {}}]}
+        with self.assertRaises(ValidationError):
+            Spec.model_validate(bad)
+
+    def test_aggregate_name_with_space_rejected(self):
+        bad = {"version": "0.1", "infrastructure": {"database": "pg", "messaging": "ev"},
+               "contexts": [{"name": "c", "domains": {"My Agg": {
+                   "kind": "aggregate", "states": ["X", "Y"], "transitions": {"X": ["Y"]}}}}]}
+        with self.assertRaises(ValidationError):
+            Spec.model_validate(bad)
+
+    def test_state_name_with_space_rejected(self):
+        bad = {"version": "0.1", "infrastructure": {"database": "pg", "messaging": "ev"},
+               "contexts": [{"name": "c", "domains": {"A": {
+                   "kind": "aggregate", "states": ["LOCKED READY"], "transitions": {}}}}]}
+        with self.assertRaises(ValidationError):
+            Spec.model_validate(bad)
+
     def test_relation_to_unknown_context_rejected(self):
         bad = {
             "version": "0.1",

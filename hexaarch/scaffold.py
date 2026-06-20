@@ -508,6 +508,121 @@ if __name__ == "__main__":
 '''
 )
 
+DT_MULTIRANGE_T = _env.from_string(
+    '''"""[GENERATED] {{ name }} 결정표 — 다차원 range 룩업{% if versioned %} + 버저닝{% endif %}. 순수 도메인.
+
+입력 {{ inputs | join(', ') }} 각각의 구간을 모두 만족(AND)하는 행을 찾는다.
+다차원 완전성 자동검사는 생략(타일링 비용) — 필요 시 수동 검토.  req: {{ id }}
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+{% if versioned %}from datetime import date
+{% endif %}
+from contexts.{{ ctx }}.domain.exceptions import NoMatchingRow
+
+
+@dataclass(frozen=True)
+class {{ cls }}Rule:
+{% if versioned %}    version: str
+    effective_date: date
+{% endif %}{% for i in inputs %}    {{ i }}_min: float
+    {{ i }}_max: float | None
+{% endfor %}    {{ out }}: str
+
+    def contains(self, {{ args }}) -> bool:
+        return ({% for i in inputs %}({{ i }} >= self.{{ i }}_min and (self.{{ i }}_max is None or {{ i }} < self.{{ i }}_max)){% if not loop.last %} and {% endif %}{% endfor %})
+
+
+class {{ cls }}Table:
+    def __init__(self, rules: list[{{ cls }}Rule]):
+        self.rules = list(rules)
+{% if versioned %}
+    def active_version_as_of(self, as_of: date) -> str:
+        eligible = {r.effective_date for r in self.rules if r.effective_date <= as_of}
+        if not eligible:
+            raise NoMatchingRow(f"{as_of} 시점에 유효한 버전 없음")
+        latest = max(eligible)
+        return next(r.version for r in self.rules if r.effective_date == latest)
+{% endif %}
+    def lookup(self, {{ args }}{% if versioned %}, as_of: date{% endif %}) -> str:
+{% if versioned %}        version = self.active_version_as_of(as_of)
+{% endif %}        for r in self.rules:
+{% if versioned %}            if r.version != version:
+                continue
+{% endif %}            if r.contains({{ argnames }}):
+                return r.{{ out }}
+        raise NoMatchingRow("어느 구간 조합에도 안 걸림")
+'''
+)
+
+DT_MULTIRANGE_LOADER_T = _env.from_string(
+    '''"""[GENERATED] {{ name }} 로더 — CSV(데이터) → {{ cls }}Table. 어댑터."""
+
+from __future__ import annotations
+
+import csv
+from pathlib import Path
+{% if versioned %}from datetime import date
+{% endif %}
+from contexts.{{ ctx }}.domain.{{ name }}_table import {{ cls }}Rule, {{ cls }}Table
+
+_CSV = Path(__file__).resolve().parent.parent / "domain" / "decision_tables" / "{{ name }}.csv"
+
+
+def _num(s: str):
+    s = s.strip()
+    return None if s == "" else float(s)
+
+
+def load_{{ name }}_table(path: Path = _CSV) -> {{ cls }}Table:
+    rules: list[{{ cls }}Rule] = []
+    with open(path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(line for line in f if not line.lstrip().startswith("#"))
+        for row in reader:
+            rules.append({{ cls }}Rule(
+{% if versioned %}                version=row["version"].strip(),
+                effective_date=date.fromisoformat(row["effective_date"].strip()),
+{% endif %}{% for i in inputs %}                {{ i }}_min=_num(row["{{ i }}_min"]),
+                {{ i }}_max=_num(row["{{ i }}_max"]),
+{% endfor %}                {{ out }}=row["{{ out }}"].strip(),
+            ))
+    return {{ cls }}Table(rules)
+'''
+)
+
+DT_MULTIRANGE_TEST_T = _env.from_string(
+    '''"""[GENERATED] {{ name }} 다차원 range 결정표 테스트 — 룩업. 스펙에서 생성."""
+
+import unittest
+{% if versioned %}from datetime import date
+{% endif %}
+from contexts.{{ ctx }}.domain.{{ name }}_table import {{ cls }}Rule, {{ cls }}Table
+from contexts.{{ ctx }}.domain.exceptions import NoMatchingRow
+
+{% if versioned %}_V = dict(version="v1", effective_date=date(2026, 1, 1))
+{% else %}_V: dict = {}
+{% endif %}
+
+class {{ cls }}TableTest(unittest.TestCase):
+    def test_lookup_hit_and_miss(self):
+        t = {{ cls }}Table([
+            {{ cls }}Rule(**_V, {% for i in inputs %}{{ i }}_min=0.0, {{ i }}_max=10.0, {% endfor %}{{ out }}="OUT"),
+        ])
+        self.assertEqual(
+            t.lookup({% for i in inputs %}5.0, {% endfor %}{% if versioned %}as_of=date(2026, 6, 1){% endif %}),
+            "OUT",
+        )
+        with self.assertRaises(NoMatchingRow):
+            t.lookup({% for i in inputs %}99.0, {% endfor %}{% if versioned %}as_of=date(2026, 6, 1){% endif %})
+
+
+if __name__ == "__main__":
+    unittest.main()
+'''
+)
+
 AGENTS_T = _env.from_string(
     '''# AGENTS.md — 이 프로젝트에서 바이브코딩하는 규칙
 
@@ -753,14 +868,15 @@ def _emit_domain(w, c: Context, agg: str, d: Domain) -> None:
 def _emit_decision_tables(w, out: Path, written: list[str], c: Context) -> None:
     """결정표 → CSV 스텁 + 순수 평가기(domain) + CSV 로더(adapter) + 테스트.
 
-    range(단일 입력)는 구간 룩업·버저닝·완전성 검사까지 생성(정책을 코어에 박음).
-    그 외(lookup/flag/다중입력)는 정확매칭 룩업으로 생성."""
+    range(단일 입력)=구간 룩업+버저닝+완전성 검사, range(다중 입력)=N차원 구간 룩업(완전성 생략),
+    lookup/flag=정확매칭 룩업. 모두 평가기(domain)+CSV 로더(adapter)+테스트를 생성."""
     base = f"contexts/{c.name}"
     w(f"{base}/adapters/__init__.py", "")
     for t in c.decision_tables:
         slug = _table_slug(t)
         cls = _pascal(slug)
         is_range = t.kind == "range" and len(t.inputs) == 1
+        is_multirange = t.kind == "range" and len(t.inputs) > 1
         # 입력/출력명을 안전한 파이썬 식별자로 정규화 (공백·특수문자·비ASCII → 위치 폴백)
         inputs_safe = [_ident(n) or f"in{i}" for i, n in enumerate(t.inputs, 1)]
         out_safe = _ident(t.output) or "out"
@@ -768,8 +884,9 @@ def _emit_decision_tables(w, out: Path, written: list[str], c: Context) -> None:
         cols: list[str] = []
         if t.versioned:
             cols += ["version", "effective_date"]
-        if is_range:
-            cols += [f"{inputs_safe[0]}_min", f"{inputs_safe[0]}_max"]
+        if is_range or is_multirange:
+            for i in inputs_safe:
+                cols += [f"{i}_min", f"{i}_max"]
         else:
             cols += list(inputs_safe)
         cols += [out_safe]
@@ -789,6 +906,15 @@ def _emit_decision_tables(w, out: Path, written: list[str], c: Context) -> None:
             w(f"{base}/adapters/{slug}_loader.py", DT_RANGE_LOADER_T.render(inp=inp, **common))
             _write(out / "tests" / f"test_{c.name}_{slug}_table.py",
                    DT_RANGE_TEST_T.render(inp=inp, **common))
+        elif is_multirange:
+            args = ", ".join(f"{i}: float" for i in inputs_safe)
+            argnames = ", ".join(inputs_safe)
+            w(f"{base}/domain/{slug}_table.py",
+              DT_MULTIRANGE_T.render(inputs=inputs_safe, args=args, argnames=argnames, **common))
+            w(f"{base}/adapters/{slug}_loader.py",
+              DT_MULTIRANGE_LOADER_T.render(inputs=inputs_safe, **common))
+            _write(out / "tests" / f"test_{c.name}_{slug}_table.py",
+                   DT_MULTIRANGE_TEST_T.render(inputs=inputs_safe, **common))
         else:
             tail = "," if len(inputs_safe) == 1 else ""
             args = ", ".join(f"{i}: str" for i in inputs_safe)

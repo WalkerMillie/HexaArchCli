@@ -12,10 +12,18 @@ import tempfile
 import unittest
 
 from hexaarch.scaffold import scaffold
-from hexaarch.spec import load_spec
+from hexaarch.spec import Spec, load_spec
 
 EXAMPLE = pathlib.Path(__file__).resolve().parent.parent / "examples" / "seoul-apt" / "domain-spec.yaml"
 CSV_REL = "src/contexts/regulation/domain/decision_tables/loan_limit.csv"
+
+MULTI = Spec.model_validate({
+    "version": "0.1",
+    "infrastructure": {"database": "pg", "messaging": "ev"},
+    "contexts": [{"name": "tax", "decision_tables": [{
+        "name": "capital_gains", "kind": "range",
+        "inputs": ["price", "years"], "output": "rate", "versioned": False, "id": "TAX-1"}]}],
+})
 
 
 class GeneratedDecisionTable(unittest.TestCase):
@@ -81,6 +89,32 @@ class GeneratedDecisionTable(unittest.TestCase):
             r = subprocess.run([sys.executable, "-c", probe],
                                cwd=d, env=env, capture_output=True, text=True)
             self.assertIn("REJECTED", r.stdout, r.stderr)
+
+
+class MultiInputRange(unittest.TestCase):
+    def test_multi_dim_range_lookup(self):
+        with tempfile.TemporaryDirectory() as d:
+            scaffold(MULTI, d)
+            mod = pathlib.Path(d) / "src/contexts/tax/domain/capital_gains_table.py"
+            self.assertIn("def contains(self, price: float, years: float)", mod.read_text())
+            probe = (
+                "from contexts.tax.domain.capital_gains_table import CapitalGainsTable, CapitalGainsRule\n"
+                "from contexts.tax.domain.exceptions import NoMatchingRow\n"
+                "t = CapitalGainsTable([\n"
+                "  CapitalGainsRule(price_min=0.0, price_max=10.0, years_min=0.0, years_max=2.0, rate='HI'),\n"
+                "  CapitalGainsRule(price_min=0.0, price_max=10.0, years_min=2.0, years_max=None, rate='LO'),\n"
+                "])\n"
+                "assert t.lookup(5.0, 1.0) == 'HI'\n"
+                "assert t.lookup(5.0, 9.0) == 'LO'\n"
+                "try:\n"
+                "    t.lookup(99.0, 1.0); print('NO-RAISE')\n"
+                "except NoMatchingRow:\n"
+                "    print('OK')\n"
+            )
+            env = {**os.environ, "PYTHONPATH": str(pathlib.Path(d) / "src")}
+            r = subprocess.run([sys.executable, "-c", probe], cwd=d, env=env,
+                               capture_output=True, text=True)
+            self.assertIn("OK", r.stdout, r.stderr)
 
 
 if __name__ == "__main__":
