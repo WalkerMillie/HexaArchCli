@@ -8,9 +8,9 @@
                                    — 대안 필요 시 종료코드 4, 거부 시 5
   extract  <policy> <out>         정책문서 → 스펙 초안 (LLM, 사용자 Claude 세션)
                                    — 추출→검증→복구 루프, 실패 시 종료코드 6
+  select-arch <policy>            정책문서 → 아키텍처 대안 N개 (LLM, 자문). 실패 시 종료코드 6
 
-종료코드: 0 통과 · 2 스펙 검증 실패 · 3 check 위반 · 4 gate 대안 · 5 gate 거부 · 6 extract 실패.
-추후: select-arch (LLM).
+종료코드: 0 통과 · 2 스펙 검증 실패 · 3 check 위반 · 4 gate 대안 · 5 gate 거부 · 6 LLM 실패.
 """
 
 from __future__ import annotations
@@ -62,10 +62,18 @@ def main(argv: list[str] | None = None) -> int:
     p_ext.add_argument("--model", default=None, help="claude 모델 별칭/이름 (예: sonnet)")
     p_ext.add_argument("--max-repair", type=int, default=2, help="검증 실패 시 자가복구 재시도 횟수")
 
+    p_arch = sub.add_parser("select-arch", help="정책문서 → 아키텍처 대안 N개 (LLM, 자문)")
+    p_arch.add_argument("policy")
+    p_arch.add_argument("--n", type=int, default=3, help="제시할 대안 수")
+    p_arch.add_argument("--model", default=None, help="claude 모델 별칭/이름")
+    p_arch.add_argument("--out", default=None, help="대안을 JSON으로 저장할 경로(선택)")
+
     args = parser.parse_args(argv)
 
     if args.cmd == "extract":
         return _run_extract(args)
+    if args.cmd == "select-arch":
+        return _run_select_arch(args)
 
     if args.cmd == "gate":
         old, err = _load(args.old)
@@ -120,6 +128,29 @@ def _run_extract(args) -> int:
     aggs = sum(len(c.domains) for c in spec.contexts)
     print(f"✓ extract 완료 — {len(spec.contexts)}개 컨텍스트 · {aggs}개 도메인 → {args.out}")
     print("  (검증 통과한 초안. scaffold 전에 사람이 한 번 검토 권장.)")
+    return 0
+
+
+def _run_select_arch(args) -> int:
+    from hexaarch.llm import ClaudeSessionBackend, LLMError
+    from hexaarch.select_arch import render_text, select_arch
+
+    policy = pathlib.Path(args.policy)
+    if not policy.exists():
+        print(f"정책문서 없음: {policy}", file=sys.stderr)
+        return 6
+    print(f"아키텍처 대안 탐색 중 (사용자 Claude 세션)… {policy}", file=sys.stderr)
+    try:
+        proposal = select_arch(policy.read_text(encoding="utf-8"),
+                               ClaudeSessionBackend(), n=args.n, model=args.model)
+    except LLMError as e:
+        print(f"select-arch 실패: {e}", file=sys.stderr)
+        return 6
+    print(render_text(proposal))
+    if args.out:
+        pathlib.Path(args.out).write_text(
+            proposal.model_dump_json(indent=2), encoding="utf-8")
+        print(f"\n(대안 {len(proposal.alternatives)}개 저장 → {args.out})", file=sys.stderr)
     return 0
 
 

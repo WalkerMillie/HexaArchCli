@@ -37,6 +37,13 @@ class ScaffoldDeterminism(unittest.TestCase):
             # 결정표 CSV 스텁(range + 버저닝 컬럼)
             csv = (pathlib.Path(d) / "src/contexts/regulation/domain/decision_tables/loan_limit.csv").read_text()
             self.assertIn("version,effective_date,price_min,price_max,max_loan", csv)
+            # 결정표 평가기(순수 도메인) + CSV 로더(어댑터) 생성
+            table = (pathlib.Path(d) / "src/contexts/regulation/domain/loan_limit_table.py").read_text()
+            self.assertIn("class LoanLimitTable", table)
+            self.assertIn("def check_completeness", table)
+            self.assertIn("def active_version_as_of", table)   # versioned
+            loader = (pathlib.Path(d) / "src/contexts/regulation/adapters/loan_limit_loader.py").read_text()
+            self.assertIn("def load_loan_limit_table", loader)
             # 바이브코딩 규칙 파일 (AI 에이전트가 읽는다)
             agents = (pathlib.Path(d) / "AGENTS.md").read_text()
             self.assertIn("impl 블록 안에서만 짠다", agents)

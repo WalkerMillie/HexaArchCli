@@ -35,9 +35,10 @@ HexaArch는 **단일 정책 스펙(`domain-spec.yaml`)을 진실의 원천(SSOT)
 
 | 단계 | 하는 일 |
 |---|---|
+| **select-arch** | (자문) 정책문서 → 바운디드 컨텍스트 분해 **대안 N개** + 장단점/추천. 스펙 확정 전 설계 탐색. |
 | **extract** | 정책/기획 문서 → 스펙 초안. 사용자 Claude 세션(`claude -p`)으로 추출 후 **검증→자가복구** 루프. |
 | **validate** | 스펙을 Pydantic + 의미 규칙으로 검증. 깨진 IR(미정의 상태 전이·자기 전이·가드 불일치 등)은 생성 *전에* 거부. |
-| **scaffold** | 스펙 → 상태 머신·`_transition`·예외·포트·전이 매트릭스 테스트·경계 가드·`AGENTS.md` 생성. |
+| **scaffold** | 스펙 → 상태 머신·`_transition`·예외·포트·전이 매트릭스 테스트·경계 가드·`AGENTS.md` 생성. 결정표는 *순수 평가기*(range 구간 룩업 + `effective_date` 버저닝 + **완전성 검사**)와 CSV 로더(어댑터)로 생성 — "정책을 도메인 코어에 박는다". |
 | **check** | (코드 편집 가드) 매 편집 후 "원본 규칙이 깨졌는지" 판정. `스펙 재생성 → impl 블록만 빼고 비교(drift) + 도메인 import 스캔(boundary)`. |
 | **gate** | (스펙 변경 가드) 스펙 old→new를 비교해 **통과/대안/거부**. 가드·불변식·상태 제거는 기본 거부. |
 
@@ -84,6 +85,9 @@ pip install -e .            # 의존: pyyaml, pydantic, jinja2
 ## 사용법
 
 ```bash
+# 0) (선택) 아키텍처 분해 대안 탐색 — 스펙 확정 전 설계 자문
+hexaarch select-arch examples/seoul-apt/policy.md --n 3 --model sonnet
+
 # 1) 정책문서 → 스펙 초안 (사용자 Claude 로그인 필요, 별도 API 키 X)
 hexaarch extract  examples/seoul-apt/policy.md ./spec.yaml --model sonnet
 
@@ -124,6 +128,7 @@ hexaarch/            # 본체 (순수 Python, FastAPI 불필요)
   check.py           #   변경 가드 (drift + boundary)
   gate.py            #   변경 게이트 (스펙 old→new 충돌 판정)
   extract.py         #   정책문서 → 스펙 (추출→검증→자가복구 루프)
+  select_arch.py     #   정책문서 → 아키텍처 분해 대안 N개 (LLM 자문)
   llm/               #   LLM 백엔드 추상화 (ClaudeSessionBackend 기본 = claude -p)
   cli.py             #   argparse CLI
 examples/seoul-apt/  # 드라이브 케이스 (서울 아파트 의사결정 분석)
@@ -155,7 +160,9 @@ cd examples/seoul-apt/reference && PYTHONPATH=src python3 -m unittest discover -
 1. ✅ 검증 + 결정론 생성 + 경계/상태 가드
 2. ✅ 변경 가드 `check` (§9) · 변경 게이트 `gate` (§10)
 3. ✅ LLM `extract` (사용자 Claude 세션)
-4. ⬜ `select-arch` (아키텍처 대안 제시) · 결정표 로직/DRF 어댑터 생성 확장
+4. ✅ 결정표 로직 생성 (range 룩업·버저닝·완전성 검사 + CSV 로더)
+5. ✅ `select-arch` (아키텍처 분해 대안 제시, LLM 자문)
+6. ⬜ DRF 어댑터/view 스텁 생성 확장 (§2 판단 누출 방어)
 
 ## 기술 스택
 

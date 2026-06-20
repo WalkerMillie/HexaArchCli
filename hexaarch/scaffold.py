@@ -28,6 +28,20 @@ def _enum_name(agg: str) -> str:
     return f"{agg}State"
 
 
+def _ident(name: str) -> str:
+    """임의 이름 → 안전한 파이썬 식별자 슬러그 (한글/공백 → '', 비면 호출자가 id로 폴백)."""
+    s = re.sub(r"[^0-9a-zA-Z]+", "_", name).strip("_").lower()
+    return s
+
+
+def _pascal(slug: str) -> str:
+    return "".join(p[:1].upper() + p[1:] for p in slug.split("_") if p)
+
+
+def _table_slug(t) -> str:
+    return _ident(t.name) or _ident(t.id)
+
+
 STATE_T = _env.from_string(
     '''"""[GENERATED] {{ agg }} 상태 + 전이 테이블. 방어선 A. 스펙에서 결정론 생성 — 직접 수정 금지."""
 
@@ -51,6 +65,7 @@ EXC_T = _env.from_string(
 class {{ ctxcap }}Error(Exception):
     pass
 
+{% if has_aggregates %}
 
 class IllegalTransition({{ ctxcap }}Error):
     """방어선 A — 허용 안 된 전이."""
@@ -63,6 +78,20 @@ class IllegalTransition({{ ctxcap }}Error):
 
 class InvariantViolation({{ ctxcap }}Error):
     """방어선 B — 불변식 위반."""
+{% endif %}
+{% if has_tables %}
+
+class NoMatchingRow({{ ctxcap }}Error):
+    """결정표에서 입력에 맞는 행 없음 (완전성 위반의 런타임 증상)."""
+
+
+class IncompleteDecisionTable({{ ctxcap }}Error):
+    """결정표 완전성 위반 — 구간 공백/겹침/빈칸. (§9-④)"""
+
+    def __init__(self, problems):
+        self.problems = problems
+        super().__init__("결정표 완전성 위반:\\n" + "\\n".join(problems))
+{% endif %}
 '''
 )
 
@@ -196,6 +225,281 @@ if __name__ == "__main__":
 
 BOUNDARY_TEST = BOUNDARY_TEST.replace("__FORBIDDEN_REPR__", repr(FORBIDDEN_IMPORTS))
 
+# ── 결정표(decision table) 생성 — 정책을 도메인 코어에 박는다 (DESIGN §5.3, §9-④) ──
+
+DT_RANGE_T = _env.from_string(
+    '''"""[GENERATED] {{ name }} 결정표 — range 룩업{% if versioned %} + effective_date 버저닝{% endif %} + 완전성 검사. 순수 도메인.
+
+정책을 도메인 코어에 박는다. 행(데이터)=decision_tables/{{ name }}.csv, 읽기=adapters/{{ name }}_loader.
+스펙에서 결정론 생성 — 직접 수정 금지(정책을 바꾸려면 스펙/CSV를 고친다).  req: {{ id }}
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+{% if versioned %}from datetime import date
+{% endif %}
+from contexts.{{ ctx }}.domain.exceptions import IncompleteDecisionTable, NoMatchingRow
+
+
+@dataclass(frozen=True)
+class {{ cls }}Rule:
+{% if versioned %}    version: str
+    effective_date: date
+{% endif %}    {{ inp }}_min: float
+    {{ inp }}_max: float | None   # None = 무한대(∞)
+    {{ out }}: str
+
+    def contains(self, {{ inp }}: float) -> bool:
+        if {{ inp }} < self.{{ inp }}_min:
+            return False
+        return self.{{ inp }}_max is None or {{ inp }} < self.{{ inp }}_max
+
+
+class {{ cls }}Table:
+    def __init__(self, rules: list[{{ cls }}Rule]):
+        self.rules = list(rules)
+{% if versioned %}
+    def active_version_as_of(self, as_of: date) -> str:
+        eligible = {r.effective_date for r in self.rules if r.effective_date <= as_of}
+        if not eligible:
+            raise NoMatchingRow(f"{as_of} 시점에 유효한 버전 없음")
+        latest = max(eligible)
+        return next(r.version for r in self.rules if r.effective_date == latest)
+
+    def _grouped(self) -> dict:
+        groups: dict = {}
+        for r in self.rules:
+            groups.setdefault(r.version, []).append(r)
+        return {v: sorted(rs, key=lambda r: r.{{ inp }}_min) for v, rs in groups.items()}
+
+    def lookup(self, {{ inp }}: float, as_of: date) -> str:
+        for r in self._grouped()[self.active_version_as_of(as_of)]:
+            if r.contains({{ inp }}):
+                return r.{{ out }}
+        raise NoMatchingRow(str({{ inp }}) + " 값이 어느 구간에도 안 걸림")
+{% else %}
+    def _grouped(self) -> dict:
+        return {"-": sorted(self.rules, key=lambda r: r.{{ inp }}_min)}
+
+    def lookup(self, {{ inp }}: float) -> str:
+        for r in self._grouped()["-"]:
+            if r.contains({{ inp }}):
+                return r.{{ out }}
+        raise NoMatchingRow(str({{ inp }}) + " 값이 어느 구간에도 안 걸림")
+{% endif %}
+    def check_completeness(self) -> list[str]:
+        """버전별로 [0, ∞)를 빈틈/겹침 없이 타일링하는지 (§9-④)."""
+        problems: list[str] = []
+        for version, rows in sorted(self._grouped().items()):
+            if not rows:
+                continue
+            if rows[0].{{ inp }}_min != 0:
+                problems.append(f"[{version}] 0부터 시작 안 함 (시작={rows[0].{{ inp }}_min})")
+            for prev, cur in zip(rows, rows[1:]):
+                if prev.{{ inp }}_max is None:
+                    problems.append(f"[{version}] ∞ 구간 뒤에 또 구간 존재")
+                elif cur.{{ inp }}_min > prev.{{ inp }}_max:
+                    problems.append(f"[{version}] 공백: {prev.{{ inp }}_max}~{cur.{{ inp }}_min}")
+                elif cur.{{ inp }}_min < prev.{{ inp }}_max:
+                    problems.append(f"[{version}] 겹침: {cur.{{ inp }}_min} < {prev.{{ inp }}_max}")
+            if rows[-1].{{ inp }}_max is not None:
+                problems.append(f"[{version}] 마지막 구간이 ∞로 안 열림 (max={rows[-1].{{ inp }}_max})")
+        return problems
+
+    def assert_complete(self) -> None:
+        problems = self.check_completeness()
+        if problems:
+            raise IncompleteDecisionTable(problems)
+'''
+)
+
+DT_LOOKUP_T = _env.from_string(
+    '''"""[GENERATED] {{ name }} 결정표 — {{ kind }} 정확매칭 룩업{% if versioned %} + 버저닝{% endif %}. 순수 도메인.
+
+행=decision_tables/{{ name }}.csv, 읽기=adapters/{{ name }}_loader.  req: {{ id }}
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+{% if versioned %}from datetime import date
+{% endif %}
+from contexts.{{ ctx }}.domain.exceptions import NoMatchingRow
+
+
+@dataclass(frozen=True)
+class {{ cls }}Rule:
+{% if versioned %}    version: str
+    effective_date: date
+{% endif %}{% for i in inputs %}    {{ i }}: str
+{% endfor %}    {{ out }}: str
+
+
+class {{ cls }}Table:
+    def __init__(self, rules: list[{{ cls }}Rule]):
+        self.rules = list(rules)
+{% if versioned %}
+    def active_version_as_of(self, as_of: date) -> str:
+        eligible = {r.effective_date for r in self.rules if r.effective_date <= as_of}
+        if not eligible:
+            raise NoMatchingRow(f"{as_of} 시점에 유효한 버전 없음")
+        latest = max(eligible)
+        return next(r.version for r in self.rules if r.effective_date == latest)
+{% endif %}
+    def lookup(self, {{ args }}{% if versioned %}, as_of: date{% endif %}) -> str:
+        key = ({{ keyexpr }})
+{% if versioned %}        version = self.active_version_as_of(as_of)
+{% endif %}        for r in self.rules:
+{% if versioned %}            if r.version != version:
+                continue
+{% endif %}            if ({{ rulekey }}) == key:
+                return r.{{ out }}
+        raise NoMatchingRow(str(key) + " 조합에 맞는 행 없음")
+'''
+)
+
+DT_RANGE_LOADER_T = _env.from_string(
+    '''"""[GENERATED] {{ name }} 로더 — CSV(데이터) → {{ cls }}Table. 어댑터(I/O는 여기서만)."""
+
+from __future__ import annotations
+
+import csv
+from pathlib import Path
+{% if versioned %}from datetime import date
+{% endif %}
+from contexts.{{ ctx }}.domain.{{ name }}_table import {{ cls }}Rule, {{ cls }}Table
+
+_CSV = Path(__file__).resolve().parent.parent / "domain" / "decision_tables" / "{{ name }}.csv"
+
+
+def _num(s: str):
+    s = s.strip()
+    return None if s == "" else float(s)
+
+
+def load_{{ name }}_table(path: Path = _CSV) -> {{ cls }}Table:
+    rules: list[{{ cls }}Rule] = []
+    with open(path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(line for line in f if not line.lstrip().startswith("#"))
+        for row in reader:
+            rules.append({{ cls }}Rule(
+{% if versioned %}                version=row["version"].strip(),
+                effective_date=date.fromisoformat(row["effective_date"].strip()),
+{% endif %}                {{ inp }}_min=_num(row["{{ inp }}_min"]),
+                {{ inp }}_max=_num(row["{{ inp }}_max"]),
+                {{ out }}=row["{{ out }}"].strip(),
+            ))
+    return {{ cls }}Table(rules)
+'''
+)
+
+DT_LOOKUP_LOADER_T = _env.from_string(
+    '''"""[GENERATED] {{ name }} 로더 — CSV(데이터) → {{ cls }}Table. 어댑터."""
+
+from __future__ import annotations
+
+import csv
+from pathlib import Path
+{% if versioned %}from datetime import date
+{% endif %}
+from contexts.{{ ctx }}.domain.{{ name }}_table import {{ cls }}Rule, {{ cls }}Table
+
+_CSV = Path(__file__).resolve().parent.parent / "domain" / "decision_tables" / "{{ name }}.csv"
+
+
+def load_{{ name }}_table(path: Path = _CSV) -> {{ cls }}Table:
+    rules: list[{{ cls }}Rule] = []
+    with open(path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(line for line in f if not line.lstrip().startswith("#"))
+        for row in reader:
+            rules.append({{ cls }}Rule(
+{% if versioned %}                version=row["version"].strip(),
+                effective_date=date.fromisoformat(row["effective_date"].strip()),
+{% endif %}{% for i in inputs %}                {{ i }}=row["{{ i }}"].strip(),
+{% endfor %}                {{ out }}=row["{{ out }}"].strip(),
+            ))
+    return {{ cls }}Table(rules)
+'''
+)
+
+DT_RANGE_TEST_T = _env.from_string(
+    '''"""[GENERATED] {{ name }} range 결정표 테스트 — 완전성 + 룩업 (§9-④). 스펙에서 생성."""
+
+import unittest
+{% if versioned %}from datetime import date
+{% endif %}
+from contexts.{{ ctx }}.domain.{{ name }}_table import {{ cls }}Rule, {{ cls }}Table
+from contexts.{{ ctx }}.domain.exceptions import IncompleteDecisionTable, NoMatchingRow
+
+{% if versioned %}_V = dict(version="v1", effective_date=date(2026, 1, 1))
+{% else %}_V: dict = {}
+{% endif %}
+
+def _complete():
+    return {{ cls }}Table([
+        {{ cls }}Rule(**_V, {{ inp }}_min=0.0, {{ inp }}_max=10.0, {{ out }}="A"),
+        {{ cls }}Rule(**_V, {{ inp }}_min=10.0, {{ inp }}_max=None, {{ out }}="B"),
+    ])
+
+
+class {{ cls }}TableTest(unittest.TestCase):
+    def test_complete_passes(self):
+        self.assertEqual(_complete().check_completeness(), [])
+        _complete().assert_complete()
+
+    def test_gap_detected(self):
+        t = {{ cls }}Table([
+            {{ cls }}Rule(**_V, {{ inp }}_min=0.0, {{ inp }}_max=10.0, {{ out }}="A"),
+            {{ cls }}Rule(**_V, {{ inp }}_min=20.0, {{ inp }}_max=None, {{ out }}="B"),
+        ])
+        self.assertTrue(any("공백" in p for p in t.check_completeness()))
+        with self.assertRaises(IncompleteDecisionTable):
+            t.assert_complete()
+
+    def test_lookup(self):
+        self.assertEqual(_complete().lookup(5.0{% if versioned %}, date(2026, 6, 1){% endif %}), "A")
+        self.assertEqual(_complete().lookup(50.0{% if versioned %}, date(2026, 6, 1){% endif %}), "B")
+        with self.assertRaises(NoMatchingRow):
+            _complete().lookup(-1.0{% if versioned %}, date(2026, 6, 1){% endif %})
+
+
+if __name__ == "__main__":
+    unittest.main()
+'''
+)
+
+DT_LOOKUP_TEST_T = _env.from_string(
+    '''"""[GENERATED] {{ name }} {{ kind }} 결정표 테스트 — 정확매칭 룩업. 스펙에서 생성."""
+
+import unittest
+{% if versioned %}from datetime import date
+{% endif %}
+from contexts.{{ ctx }}.domain.{{ name }}_table import {{ cls }}Rule, {{ cls }}Table
+from contexts.{{ ctx }}.domain.exceptions import NoMatchingRow
+
+{% if versioned %}_V = dict(version="v1", effective_date=date(2026, 1, 1))
+{% else %}_V: dict = {}
+{% endif %}
+
+class {{ cls }}TableTest(unittest.TestCase):
+    def test_lookup_hit_and_miss(self):
+        t = {{ cls }}Table([
+            {{ cls }}Rule(**_V, {% for i in inputs %}{{ i }}="k{{ loop.index }}", {% endfor %}{{ out }}="OUT"),
+        ])
+        self.assertEqual(
+            t.lookup({% for i in inputs %}"k{{ loop.index }}", {% endfor %}{% if versioned %}as_of=date(2026, 6, 1){% endif %}),
+            "OUT",
+        )
+        with self.assertRaises(NoMatchingRow):
+            t.lookup({% for i in inputs %}"nope{{ loop.index }}", {% endfor %}{% if versioned %}as_of=date(2026, 6, 1){% endif %})
+
+
+if __name__ == "__main__":
+    unittest.main()
+'''
+)
+
 AGENTS_T = _env.from_string(
     '''# AGENTS.md — 이 프로젝트에서 바이브코딩하는 규칙
 
@@ -256,14 +560,16 @@ def scaffold(spec: Spec, out_dir: str | Path) -> list[str]:
     for c in spec.contexts:
         base = f"contexts/{c.name}"
         w(f"{base}/__init__.py", "")
-        if c.domains:
+        has_agg = any(d.kind == "aggregate" for d in c.domains.values())
+        if c.domains or c.decision_tables:
             w(f"{base}/domain/__init__.py", "")
             w(f"{base}/domain/exceptions.py",
-              EXC_T.render(ctx=c.name, ctxcap=c.name.capitalize()))
+              EXC_T.render(ctx=c.name, ctxcap=c.name.capitalize(),
+                           has_aggregates=has_agg, has_tables=bool(c.decision_tables)))
         for agg, d in c.domains.items():
             _emit_domain(w, c, agg, d)
         if c.decision_tables:
-            _emit_decision_tables(w, c)
+            _emit_decision_tables(w, out, written, c)
 
     # 테스트 + 경계 설정
     _write(out / "tests" / "__init__.py", "")
@@ -308,22 +614,58 @@ def _emit_domain(w, c: Context, agg: str, d: Domain) -> None:
           f'"""[GENERATED 골격] {agg} (무상태 calculation). 수식 본문은 impl.\n\n{names}\n"""\n')
 
 
-def _emit_decision_tables(w, c: Context) -> None:
+def _emit_decision_tables(w, out: Path, written: list[str], c: Context) -> None:
+    """결정표 → CSV 스텁 + 순수 평가기(domain) + CSV 로더(adapter) + 테스트.
+
+    range(단일 입력)는 구간 룩업·버저닝·완전성 검사까지 생성(정책을 코어에 박음).
+    그 외(lookup/flag/다중입력)는 정확매칭 룩업으로 생성."""
     base = f"contexts/{c.name}"
-    w(f"{base}/domain/__init__.py", "")
+    w(f"{base}/adapters/__init__.py", "")
     for t in c.decision_tables:
-        cols = []
+        slug = _table_slug(t)
+        cls = _pascal(slug)
+        is_range = t.kind == "range" and len(t.inputs) == 1
+        # 입력/출력명을 안전한 파이썬 식별자로 정규화 (공백·특수문자·비ASCII → 위치 폴백)
+        inputs_safe = [_ident(n) or f"in{i}" for i, n in enumerate(t.inputs, 1)]
+        out_safe = _ident(t.output) or "out"
+
+        cols: list[str] = []
         if t.versioned:
             cols += ["version", "effective_date"]
-        if t.kind == "range":
-            for i in t.inputs:
-                cols += [f"{i}_min", f"{i}_max"]
+        if is_range:
+            cols += [f"{inputs_safe[0]}_min", f"{inputs_safe[0]}_max"]
         else:
-            cols += list(t.inputs)
-        cols += [t.output]
-        header = ",".join(cols)
-        w(f"{base}/domain/decision_tables/{t.name}.csv",
-          f"# [GENERATED 스텁] {t.id} {t.name} (kind={t.kind}). 행은 채워라.\n{header}\n")
+            cols += list(inputs_safe)
+        cols += [out_safe]
+        legend = [f"{s}={o}" for s, o in zip(inputs_safe, t.inputs) if s != o]
+        if out_safe != t.output:
+            legend.append(f"{out_safe}={t.output}")
+        legend_note = ("  컬럼매핑: " + ", ".join(legend)) if legend else ""
+        w(f"{base}/domain/decision_tables/{slug}.csv",
+          f"# [GENERATED 스텁] {t.id} {t.name} (kind={t.kind}). 행(데이터)을 채워라.{legend_note}\n"
+          f"{','.join(cols)}\n")
+
+        common = dict(ctx=c.name, name=slug, cls=cls, out=out_safe,
+                      versioned=t.versioned, id=t.id, kind=t.kind)
+        if is_range:
+            inp = inputs_safe[0]
+            w(f"{base}/domain/{slug}_table.py", DT_RANGE_T.render(inp=inp, **common))
+            w(f"{base}/adapters/{slug}_loader.py", DT_RANGE_LOADER_T.render(inp=inp, **common))
+            _write(out / "tests" / f"test_{c.name}_{slug}_table.py",
+                   DT_RANGE_TEST_T.render(inp=inp, **common))
+        else:
+            tail = "," if len(inputs_safe) == 1 else ""
+            args = ", ".join(f"{i}: str" for i in inputs_safe)
+            keyexpr = ", ".join(inputs_safe) + tail
+            rulekey = ", ".join(f"r.{i}" for i in inputs_safe) + tail
+            w(f"{base}/domain/{slug}_table.py",
+              DT_LOOKUP_T.render(inputs=inputs_safe, args=args, keyexpr=keyexpr,
+                                 rulekey=rulekey, **common))
+            w(f"{base}/adapters/{slug}_loader.py",
+              DT_LOOKUP_LOADER_T.render(inputs=inputs_safe, **common))
+            _write(out / "tests" / f"test_{c.name}_{slug}_table.py",
+                   DT_LOOKUP_TEST_T.render(inputs=inputs_safe, **common))
+        written.append(f"tests/test_{c.name}_{slug}_table.py")
 
 
 def main(spec_path: str, out_dir: str) -> None:
