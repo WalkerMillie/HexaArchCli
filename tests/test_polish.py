@@ -73,6 +73,22 @@ class Polish(unittest.TestCase):
             self.assertIn("# port: 국토부 실거래가 REST API", ports)   # 원본 보존
             self.assertIn("class Port3(Protocol)", ports)             # 폴백 식별자
 
+    def test_leading_digit_formula_name_falls_back_to_id(self):
+        # 실측 회귀: "…3.0%p…" → 슬러그 '3_0_p_…'(선행 숫자) → def 3_0_p(...) SyntaxError 였음.
+        spec = Spec.model_validate({
+            "version": "0.1",
+            "infrastructure": {"database": "pg", "messaging": "ev"},
+            "contexts": [{"name": "analysis", "domains": {
+                "StressDSR": {"kind": "calculation", "formulas": [
+                    {"id": "AN-F04", "name": "스트레스 금리 = 실효금리 + 3.0%p (버퍼 가산)"}]}}}],
+        })
+        with tempfile.TemporaryDirectory() as d:
+            scaffold(spec, d)
+            calc = (pathlib.Path(d) / "src/contexts/analysis/domain/stress_d_s_r.py").read_text()
+            ast.parse(calc)                        # 선행 숫자 함수명이면 여기서 SyntaxError
+            self.assertIn("def an_f04(", calc)     # 빈 슬러그 → id 폴백
+            self.assertNotIn("def 3", calc)
+
 
 if __name__ == "__main__":
     unittest.main()

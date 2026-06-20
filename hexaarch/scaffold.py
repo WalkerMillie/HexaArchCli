@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import keyword
 import re
 import shutil
 from pathlib import Path
@@ -29,8 +30,16 @@ def _enum_name(agg: str) -> str:
 
 
 def _ident(name: str) -> str:
-    """임의 이름 → 안전한 파이썬 식별자 슬러그 (한글/공백 → '', 비면 호출자가 id로 폴백)."""
+    """임의 이름 → 안전한 파이썬 식별자 슬러그.
+
+    반환은 항상 '빈 문자열' 또는 '유효한 비키워드 식별자'다 — 둘 중 하나.
+    선행 숫자('3.0%p…' → '3_0_…')나 파이썬 키워드('class')처럼 식별자로 못 쓰는
+    결과는 ''로 떨어뜨려 호출자가 `_ident(x) or <폴백>` 으로 id·위치값에 폴백하게 한다.
+    (한글/공백만으로 된 이름도 '' → 폴백.)
+    """
     s = re.sub(r"[^0-9a-zA-Z]+", "_", name).strip("_").lower()
+    if not s.isidentifier() or keyword.iskeyword(s):
+        return ""
     return s
 
 
