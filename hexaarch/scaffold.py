@@ -130,7 +130,8 @@ PORTS_T = _env.from_string(
 from typing import Protocol
 
 {% for p in ports %}
-class {{ p }}(Protocol):
+# port: {{ p.original }}
+class {{ p.cls }}(Protocol):
     # >>> impl: editable (method signatures)
     ...
     # <<< impl
@@ -626,6 +627,37 @@ __all__ = [{% for agg in aggs %}"{{ agg }}Service"{% if not loop.last %}, {% end
 )
 
 
+CALC_T = _env.from_string(
+    '''"""[GENERATED 골격] {{ agg }} — 무상태 calculation (순수 함수). I/O·상태 없음.
+
+각 수식을 아래 impl 슬롯에 순수 함수로 구현한다(시그니처는 자유). 분기 규칙이 필요하면 결정표로 뺀다.
+"""
+
+from __future__ import annotations
+
+{% for f in formulas %}
+# >>> impl: editable — {{ f.id }}: {{ f.name }}
+def {{ fns[f.id] }}(*args, **kwargs):
+    raise NotImplementedError
+# <<< impl
+
+{% endfor %}'''
+)
+
+REF_T = _env.from_string(
+    '''"""[GENERATED 골격] {{ agg }} — 참조(reference) 데이터. 마스터/룩업, 거의 불변.
+
+조회 모델/인터페이스는 impl에 정의한다(또는 결정표·어댑터로 적재).
+"""
+
+from __future__ import annotations
+
+# >>> impl: editable — {{ agg }} 참조 모델/조회
+# <<< impl
+'''
+)
+
+
 def _prefixenum(states, enum):
     return [f"{enum}.{s}" for s in states]
 
@@ -701,14 +733,21 @@ def _emit_domain(w, c: Context, agg: str, d: Domain) -> None:
                        first=d.states[0], guards=d.guards, invariants=d.invariants,
                        relationship_invariants=d.relationship_invariants))
         if d.ports_out:
+            ports, seen = [], set()
+            for i, p in enumerate(d.ports_out, 1):
+                cls = _pascal(_ident(p)) or f"Port{i}"
+                if cls in seen:
+                    cls = f"{cls}{i}"
+                seen.add(cls)
+                ports.append({"cls": cls, "original": p})
             w(f"{base}/ports/__init__.py", "")
-            w(f"{base}/ports/ports_out.py", PORTS_T.render(ctx=c.name, ports=d.ports_out))
+            w(f"{base}/ports/ports_out.py", PORTS_T.render(ctx=c.name, ports=ports))
     elif d.kind == "calculation":
-        names = "\n".join(
-            f"# {f.id}: {f.name} — 순수 수식, impl에서 구현" for f in d.formulas
-        )
+        fns = {f.id: (_ident(f.name) or _ident(f.id)) for f in d.formulas}
         w(f"{base}/domain/{_snake(agg)}.py",
-          f'"""[GENERATED 골격] {agg} (무상태 calculation). 수식 본문은 impl.\n\n{names}\n"""\n')
+          CALC_T.render(agg=agg, formulas=d.formulas, fns=fns))
+    elif d.kind == "reference":
+        w(f"{base}/domain/{_snake(agg)}.py", REF_T.render(agg=agg))
 
 
 def _emit_decision_tables(w, out: Path, written: list[str], c: Context) -> None:
